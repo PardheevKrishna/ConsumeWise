@@ -4,9 +4,12 @@
 import React, { useState } from "react";
 import Button from "../../../components/Common/Button";
 
-const ImageUploader = () => {
+interface ImageUploaderProps {
+  onAnalysis: (analysis: any, highlightedImage: string) => void;
+}
+
+const ImageUploader: React.FC<ImageUploaderProps> = ({ onAnalysis }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [analysis, setAnalysis] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,59 +26,33 @@ const ImageUploader = () => {
     setError(null);
 
     try {
-      // Convert image to base64
-      const base64 = await toBase64(selectedFile);
+      const formData = new FormData();
+      formData.append("file", selectedFile);
 
-      // Send to OCR API
-      const ocrResponse = await fetch("/api/ocr", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ image: base64 }),
-      });
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_BACKEND_URL}/analyze`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
 
-      const ocrData = await ocrResponse.json();
+      const data = await response.json();
 
-      if (!ocrResponse.ok) {
-        throw new Error(ocrData.error || "OCR failed");
+      if (!response.ok) {
+        throw new Error(data.error || "Analysis failed.");
       }
 
-      const extractedText = ocrData.text;
-
-      // Send extracted text to AI Analysis API
-      const analyzeResponse = await fetch("/api/analyze", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: extractedText }),
-      });
-
-      const analyzeData = await analyzeResponse.json();
-
-      if (!analyzeResponse.ok) {
-        throw new Error(analyzeData.error || "Analysis failed");
-      }
-
-      setAnalysis(analyzeData.analysis);
+      onAnalysis(
+        data.analysis,
+        `data:image/jpeg;base64,${data.highlighted_image}`
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
   };
-
-  const toBase64 = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        if (typeof reader.result === "string") resolve(reader.result);
-        else reject("Failed to convert image to base64");
-      };
-      reader.onerror = (error) => reject(error);
-    });
 
   return (
     <div className="p-4 bg-white rounded shadow">
@@ -90,14 +67,6 @@ const ImageUploader = () => {
         {loading ? "Analyzing..." : "Analyze"}
       </Button>
       {error && <p className="text-red-600 mt-4">{error}</p>}
-      {analysis && (
-        <div className="mt-6">
-          {/* Render analysis components here */}
-          {/* Example: */}
-          {/* <HealthScore score={analysis.healthScore} /> */}
-          {/* <NutrientAnalysis data={analysis.NutritionalAnalysis} /> */}
-        </div>
-      )}
     </div>
   );
 };
