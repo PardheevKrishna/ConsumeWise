@@ -1,15 +1,23 @@
 # consume-wise-backend/main.py
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from paddleocr import PaddleOCR
-import google.generativeai as genai
+import os
+import io
 import re
 import json
-import os
+import base64
+from typing import List, Dict
 
+import cv2
+import numpy as np
+from PIL import Image
+from paddleocr import PaddleOCR
+from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+import google.generativeai as genai
+
+# Load environment variables from .env file
 load_dotenv()
 
 app = FastAPI()
@@ -17,22 +25,22 @@ app = FastAPI()
 # Configure CORS to allow requests from the frontend
 origins = [
     "http://localhost:3000",  # Next.js default port
-    # Add your production frontend URL here
+    # Add your production frontend URL here, e.g., "https://yourdomain.com"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Adjust as needed for security
+    allow_headers=["*"],  # Adjust as needed for security
 )
 
-# Initialize PaddleOCR
+# Initialize PaddleOCR with GPU support
 ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=True)
 
-# Configure the API client with the API key (ensure you store your API key securely)
-genai.configure(api_key=os.getenv('GENAI_API_KEY'))  # Use environment variables
+# Configure the AI API client with the API key from environment variables
+genai.configure(api_key=os.getenv('GENAI_API_KEY'))  # Ensure GENAI_API_KEY is set in .env
 
 # Define the generation settings for the Gemini model
 generation_config = {
@@ -43,35 +51,39 @@ generation_config = {
     "response_mime_type": "text/plain",
 }
 
-# Create the model for generation
+# Create the generative model
 model = genai.GenerativeModel(
     model_name="gemini-1.5-flash",
     generation_config=generation_config
 )
 
-# Start a chat session
+# Start a chat session with the model
 chat_session = model.start_chat(history=[])
 
 # Function to normalize text
-def normalize_text(text):
+def normalize_text(text: str) -> str:
     return ' '.join(text.lower().split())
 
-# Function to extract text with coordinates
-def extract_text_with_coords(image_bytes):
+# Function to extract text with coordinates using PaddleOCR
+def extract_text_with_coords(image_bytes: bytes) -> List[Dict]:
     try:
-        # Convert bytes to PIL Image
-        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        image_np = np.array(image)
+        # Convert bytes to NumPy array
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        # Decode image from NumPy array
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if image is None:
+            raise ValueError("Image decoding failed.")
 
         # Perform OCR on the image
-        result = ocr.ocr(image_np, cls=True)
+        result = ocr.ocr(image, cls=True)
 
         # Extract text and coordinates
         detected_items = []
         for res in result:
             for line in res:
                 text = line[1][0]  # Extract the text content
-                coords = line[0]   # Coordinates of the bounding box
+                coords = line[0]    # Coordinates of the bounding box
                 detected_items.append({'text': text, 'coords': coords})
 
         return detected_items
@@ -79,8 +91,8 @@ def extract_text_with_coords(image_bytes):
         print(f"Error during OCR: {e}")
         return []
 
-# Function to analyze detected items
-def analyze_detected_items(extracted_text):
+# Function to analyze detected items using Gemini AI
+def analyze_detected_items(extracted_text: str) -> str:
     analysis_prompt = f"""
 You are a nutrition expert. Analyze the following product details extracted from a food label:
 
@@ -149,7 +161,7 @@ Provide the analysis split into the following sections, using JSON format:
   }},
   "RecommendedAlternatives": ["Suggest healthier or more sustainable alternatives to harmful ingredients"],
   "RegulatoryCompliance": {{
-    "FSSAI": "Is this product compliant with India FSSAI India regulations? true/false",
+    "FSSAI": "Is this product compliant with India FSSAI regulations? true/false",
     "FDA": "Is this product compliant with US FDA regulations? true/false",
     "EFSA": "Is this product compliant with EU EFSA regulations? true/false",
     "OtherRegions": "Mention any other regional compliance issues"
@@ -176,8 +188,8 @@ Provide the analysis split into the following sections, using JSON format:
     # Return the AI's response
     return response.text
 
-# Function to parse the analysis response
-def parse_analysis_response(analysis_response):
+# Function to parse the AI's analysis response
+def parse_analysis_response(analysis_response: str) -> Dict:
     try:
         # Use regex to extract the JSON object
         match = re.search(r'\{.*\}', analysis_response, re.DOTALL)
@@ -196,55 +208,58 @@ def parse_analysis_response(analysis_response):
         print("Raw Analysis Response:\n", analysis_response)
         return {}
 
-import io
-from PIL import Image
-import numpy as np
-
 # Function to highlight the image based on analysis
-def highlight_image(image_path, detected_items, analysis):
-    import cv2
-    import matplotlib.pyplot as plt
+def highlight_image(image_bytes: bytes, detected_items: List[Dict], analysis: Dict) -> bytes:
+    try:
+        # Convert bytes data to a NumPy array
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        # Decode image from NumPy array
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise ValueError("Image decoding failed.")
 
-    # Load the image
-    image = cv2.imread(image_path)
+        # Get list of harmful ingredients from analysis
+        harmful_ingredients = analysis.get("HarmfulIngredients", [])
+        harmful_texts = [normalize_text(item['Ingredient']) for item in harmful_ingredients]
 
-    # Get list of harmful ingredients from analysis
-    harmful_ingredients = analysis.get("HarmfulIngredients", [])
-    harmful_texts = [normalize_text(item['Ingredient']) for item in harmful_ingredients]
+        # Define colors (BGR format for OpenCV)
+        colors = {
+            'harmful': (0, 0, 255),        # Red
+            'neutral': (0, 165, 255),      # Orange
+            'beneficial': (0, 255, 0)      # Green
+        }
 
-    # Define colors
-    colors = {
-        'harmful': (255, 0, 0),      # Red
-        'neutral': (255, 165, 0),    # Orange
-        'beneficial': (0, 255, 0)    # Green
-    }
+        # Draw bounding boxes
+        for item in detected_items:
+            text = normalize_text(item['text'])
+            coords = item['coords']
 
-    # Draw bounding boxes
-    for item in detected_items:
-        text = normalize_text(item['text'])
-        coords = item['coords']
+            if text in harmful_texts:
+                color = colors['harmful']
+            else:
+                color = colors['neutral']  # You can enhance this logic as needed
 
-        if text in harmful_texts:
-            color = colors['harmful']
-        else:
-            color = colors['neutral']  # You can enhance this logic as needed
+            # Coordinates are in the format [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+            pts = np.array(coords, np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(image, [pts], isClosed=True, color=color, thickness=2)
 
-        # Coordinates are in the format [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
-        pts = np.array(coords, np.int32)
-        pts = pts.reshape((-1, 1, 2))
-        cv2.polylines(image, [pts], isClosed=True, color=color, thickness=2)
+        # Optionally, highlight beneficial ingredients in green
+        # Implement similar logic if needed
 
-    # Convert BGR to RGB for displaying
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Encode the image back to bytes
+        _, buffer = cv2.imencode('.jpg', image)
+        highlighted_image_bytes = buffer.tobytes()
 
-    # Save the highlighted image to bytes
-    _, buffer = cv2.imencode('.jpg', image_rgb)
-    image_bytes = buffer.tobytes()
+        return highlighted_image_bytes
 
-    return image_bytes
+    except Exception as e:
+        print(f"Error in highlight_image: {e}")
+        raise e
 
-# Function to calculate health score
-def calculate_health_score(analysis):
+# Function to calculate health score based on analysis
+def calculate_health_score(analysis: Dict) -> int:
     # Start with a perfect health score of 100
     health_score = 100
 
@@ -273,8 +288,8 @@ def calculate_health_score(analysis):
 
     return health_score
 
-# Function to generate overall review
-def generate_overall_review(analysis, health_score):
+# Function to generate an overall review based on analysis and health score
+def generate_overall_review(analysis: Dict, health_score: int) -> str:
     review = []
 
     # Review based on health score
@@ -311,224 +326,11 @@ def generate_overall_review(analysis, health_score):
 
     return " ".join(review)
 
-# Function to display analysis
-def display_analysis(analysis, highlighted_image_bytes):
-    import base64
-
-    # Calculate health score and generate overall review
-    health_score = calculate_health_score(analysis)
-    overall_review = generate_overall_review(analysis, health_score)
-
-    # Prepare the highlighted image for display
-    highlighted_image_base64 = base64.b64encode(highlighted_image_bytes).decode('utf-8')
-    img_tag = f'<img src="data:image/jpeg;base64,{highlighted_image_base64}" alt="Highlighted Image" />'
-
-    # Prepare the HTML content
-    html_content = "<h2>Nutritional and Product Analysis</h2>"
-
-    # Health Score
-    color = 'green' if health_score > 80 else 'orange' if health_score > 50 else 'red'
-    html_content += f"<h3>Health Score: <span style='color:{color};'>{health_score}/100</span></h3>"
-
-    # Overall Review
-    html_content += f"<h4>Overall Review:</h4><p>{overall_review}</p>"
-
-    # Nutritional Analysis
-    nutritional_analysis = analysis.get("NutritionalAnalysis", {})
-    html_content += "<h3>Nutritional Analysis:</h3>"
-
-    # Macronutrients
-    macronutrients = nutritional_analysis.get("Macronutrients", {})
-    if macronutrients:
-        html_content += "<h4>Macronutrients:</h4>"
-        for macro in ["Carbohydrates", "Proteins", "Fats", "Fiber"]:
-            macro_data = macronutrients.get(macro, {})
-            good = macro_data.get("Good", [])
-            bad = macro_data.get("Bad", [])
-            if good:
-                html_content += f"<p style='color:green;'><strong>Good {macro}:</strong></p><ul>"
-                for item in good:
-                    html_content += f"<li>{item}</li>"
-                html_content += "</ul>"
-            if bad:
-                html_content += f"<p style='color:red;'><strong>Bad {macro}:</strong></p><ul>"
-                for item in bad:
-                    html_content += f"<li>{item}</li>"
-                html_content += "</ul>"
-
-    # Micronutrients
-    micronutrients = nutritional_analysis.get("Micronutrients", {})
-    if micronutrients:
-        html_content += "<h4>Micronutrients:</h4>"
-        for micro in ["Vitamins", "Minerals"]:
-            micro_data = micronutrients.get(micro, {})
-            good = micro_data.get("Good", [])
-            deficient = micro_data.get("Deficient", [])
-            if good:
-                html_content += f"<p style='color:green;'><strong>Good {micro}:</strong></p><ul>"
-                for item in good:
-                    html_content += f"<li>{item}</li>"
-                html_content += "</ul>"
-            if deficient:
-                html_content += f"<p style='color:red;'><strong>Deficient {micro}:</strong></p><ul>"
-                for item in deficient:
-                    html_content += f"<li>{item}</li>"
-                html_content += "</ul>"
-
-    # Health Risks and Benefits
-    health_risks = nutritional_analysis.get("HealthRisks", [])
-    health_benefits = nutritional_analysis.get("HealthBenefits", [])
-    if health_risks:
-        html_content += "<h4>Health Risks:</h4><ul>"
-        for risk in health_risks:
-            html_content += f"<li style='color:red;'>{risk}</li>"
-        html_content += "</ul>"
-    if health_benefits:
-        html_content += "<h4>Health Benefits:</h4><ul>"
-        for benefit in health_benefits:
-            html_content += f"<li style='color:green;'>{benefit}</li>"
-        html_content += "</ul>"
-
-    # Processing Level
-    processing_level = analysis.get("ProcessingLevel", {})
-    html_content += "<h3>Processing Level:</h3>"
-    level = processing_level.get("Level", "Unknown")
-    description = processing_level.get("Description", "")
-    good_processing = processing_level.get("Good", [])
-    bad_processing = processing_level.get("Bad", [])
-    color = 'green' if level.lower() == 'low' else 'orange' if level.lower() == 'medium' else 'red'
-    html_content += f"<p style='color:{color};'><strong>Level:</strong> {level}</p>"
-    html_content += f"<p>{description}</p>"
-    if good_processing:
-        html_content += "<p style='color:green;'><strong>Good Processing Aspects:</strong></p><ul>"
-        for item in good_processing:
-            html_content += f"<li>{item}</li>"
-        html_content += "</ul>"
-    if bad_processing:
-        html_content += "<p style='color:red;'><strong>Bad Processing Aspects:</strong></p><ul>"
-        for item in bad_processing:
-            html_content += f"<li>{item}</li>"
-        html_content += "</ul>"
-
-    # Harmful Ingredients
-    harmful_ingredients = analysis.get("HarmfulIngredients", [])
-    html_content += "<h3>Harmful Ingredients:</h3>"
-    if harmful_ingredients:
-        html_content += "<ul>"
-        for ingredient in harmful_ingredients:
-            name = ingredient.get('Ingredient', '')
-            reason = ingredient.get('Reason', '')
-            html_content += f"<li style='color:red;'><strong>{name}</strong>: {reason}</li>"
-        html_content += "</ul>"
-    else:
-        html_content += "<p style='color:green;'>No harmful ingredients detected.</p>"
-
-    # Diet Compliance
-    diet_compliance = analysis.get("DietCompliance", {})
-    html_content += "<h3>Diet Compliance:</h3>"
-    compliant_diets = diet_compliance.get("CompliantDiets", [])
-    non_compliant_diets = diet_compliance.get("NonCompliantDiets", [])
-    reasons = diet_compliance.get("Reasons", "")
-
-    if compliant_diets:
-        html_content += "<p style='color:green;'><strong>Compliant Diets:</strong> " + ', '.join(compliant_diets) + "</p>"
-    if non_compliant_diets:
-        html_content += "<p style='color:red;'><strong>Non-Compliant Diets:</strong> " + ', '.join(non_compliant_diets) + "</p>"
-    if reasons:
-        html_content += f"<p>{reasons}</p>"
-
-    # Diabetes/Allergen Friendly
-    daf = analysis.get("DiabetesAllergenFriendly", {})
-    html_content += "<h3>Diabetes/Allergen Friendly:</h3>"
-    is_suitable = daf.get("IsSuitable", False)
-    reasons = daf.get("Reasons", "")
-    allergens = daf.get("Allergens", [])
-
-    color = 'green' if is_suitable else 'red'
-    suitability = "Suitable" if is_suitable else "Not Suitable"
-    html_content += f"<p style='color:{color};'><strong>{suitability} for people with diabetes or allergies.</strong></p>"
-    if reasons:
-        html_content += f"<p>{reasons}</p>"
-    if allergens:
-        html_content += f"<p><strong>Allergens:</strong> {', '.join(allergens)}</p>"
-
-    # Sustainability and Ethics
-    sustainability_ethics = analysis.get("SustainabilityAndEthics", {})
-    sustainability = sustainability_ethics.get("Sustainability", "")
-    ethical_concerns = sustainability_ethics.get("EthicalConcerns", "")
-    html_content += "<h3>Sustainability and Ethics:</h3>"
-    if sustainability:
-        html_content += f"<p><strong>Sustainability:</strong> {sustainability}</p>"
-    if ethical_concerns:
-        html_content += f"<p><strong>Ethical Concerns:</strong> {ethical_concerns}</p>"
-
-    # Recommended Alternatives
-    recommended_alternatives = analysis.get("RecommendedAlternatives", [])
-    html_content += "<h3>Recommended Alternatives:</h3>"
-    if recommended_alternatives:
-        html_content += "<ul>"
-        for alternative in recommended_alternatives:
-            html_content += f"<li style='color:green;'>{alternative}</li>"
-        html_content += "</ul>"
-    else:
-        html_content += "<p>No alternatives recommended.</p>"
-
-    # Regulatory Compliance
-    regulatory_compliance = analysis.get("RegulatoryCompliance", {})
-    html_content += "<h3>Regulatory Compliance:</h3>"
-    fssai_compliance = regulatory_compliance.get("FSSAI", "Unknown")
-    fda_compliance = regulatory_compliance.get("FDA", "Unknown")
-    efsa_compliance = regulatory_compliance.get("EFSA", "Unknown")
-    other_regions = regulatory_compliance.get("OtherRegions", "")
-
-    html_content += f"<p><strong>FSSAI Compliant:</strong> {fssai_compliance}</p>"
-    html_content += f"<p><strong>FDA Compliant:</strong> {fda_compliance}</p>"
-    html_content += f"<p><strong>EFSA Compliant:</strong> {efsa_compliance}</p>"
-    if other_regions:
-        html_content += f"<p><strong>Other Region Compliance Issues:</strong> {other_regions}</p>"
-
-    # Misleading Claims
-    misleading_claims = analysis.get("MisleadingClaims", [])
-    html_content += "<h3>Misleading Claims:</h3>"
-    if misleading_claims:
-        html_content += "<ul>"
-        for claim in misleading_claims:
-            if isinstance(claim, dict):
-                claim_text = claim.get('Claim', 'Unknown Claim')
-                reason = claim.get('Reason', 'No reason provided')
-                html_content += f"<li style='color:red;'><strong>{claim_text}</strong>: {reason}</li>"
-            elif isinstance(claim, str):
-                html_content += f"<li style='color:red;'>{claim}</li>"
-            else:
-                html_content += f"<li style='color:red;'>Unknown format</li>"
-        html_content += "</ul>"
-    else:
-        html_content += "<p style='color:green;'>No misleading claims detected.</p>"
-
-    # Alternative Homemade Procedure
-    alternative_procedure = analysis.get("AlternativeHomeMadeProcedure", {})
-    ingredients = alternative_procedure.get("Ingredients", [])
-    steps = alternative_procedure.get("Steps", [])
-
-    if health_score <= 50 and (ingredients or steps):
-        html_content += "<h3>Alternative Homemade Procedure:</h3>"
-        if ingredients:
-            html_content += "<p><strong>Ingredients Required:</strong></p><ul>"
-            for ingredient in ingredients:
-                html_content += f"<li>{ingredient}</li>"
-            html_content += "</ul>"
-        if steps:
-            html_content += "<p><strong>Step-by-Step Procedure:</strong></p><ol>"
-            for step in steps:
-                html_content += f"<li>{step}</li>"
-            html_content += "</ol>"
-
-    # Display the HTML content along with the highlighted image
-    combined_html = f"{img_tag}<br/>{html_content}"
-    return combined_html
-
-import io
-import base64
+# Function to display analysis as HTML (Optional: For backend rendering)
+def display_analysis(analysis: Dict, highlighted_image_bytes: bytes) -> str:
+    # This function can be customized based on how you want to present the analysis
+    # For now, it's a placeholder and not used in the endpoint response
+    pass
 
 # Endpoint to handle image upload and analysis
 @app.post("/analyze")
@@ -547,7 +349,7 @@ async def analyze_image(file: UploadFile = File(...)):
         extracted_texts = [item['text'] for item in detected_items]
         extracted_text = '\n'.join(extracted_texts)
 
-        # Analyze the extracted text
+        # Analyze the extracted text using AI
         analysis_response = analyze_detected_items(extracted_text)
 
         # Parse the analysis response
@@ -556,13 +358,19 @@ async def analyze_image(file: UploadFile = File(...)):
         if not analysis:
             return {"error": "Analysis failed."}
 
-        # Highlight the image
-        highlighted_image_bytes = highlight_image(io.BytesIO(image_bytes), detected_items, analysis)
+        # Highlight the image based on analysis
+        highlighted_image_bytes = highlight_image(image_bytes, detected_items, analysis)
 
-        # Generate HTML for display
-        analysis_html = display_analysis(analysis, highlighted_image_bytes)
+        # Optionally, generate HTML for display (not used in this response)
+        # analysis_html = display_analysis(analysis, highlighted_image_bytes)
 
-        return {"analysis": analysis, "highlighted_image": base64.b64encode(highlighted_image_bytes).decode('utf-8')}
+        # Encode highlighted image to base64 for frontend
+        highlighted_image_base64 = base64.b64encode(highlighted_image_bytes).decode('utf-8')
+
+        return {
+            "analysis": analysis,
+            "highlighted_image": highlighted_image_base64
+        }
     except Exception as e:
         print(f"Error in /analyze endpoint: {e}")
         return {"error": "Internal Server Error."}
