@@ -29,6 +29,7 @@ app = FastAPI()
 origins = [
     "http://localhost:3000",  # Next.js default port
     "http://127.0.0.1:5500",  # Live Server port (if used)
+    "https://consume-wise-smoky.vercel.app/",
     # Add your production frontend URL here, e.g., "https://yourdomain.com"
 ]
 
