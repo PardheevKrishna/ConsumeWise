@@ -5,26 +5,30 @@ import io
 import re
 import json
 import base64
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import cv2
 import numpy as np
 from PIL import Image
 from paddleocr import PaddleOCR
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, validator
 
 import google.generativeai as genai
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Initialize FastAPI app
 app = FastAPI()
 
 # Configure CORS to allow requests from the frontend
 origins = [
     "http://localhost:3000",  # Next.js default port
+    "http://127.0.0.1:5500",  # Live Server port (if used)
     # Add your production frontend URL here, e.g., "https://yourdomain.com"
 ]
 
@@ -40,7 +44,10 @@ app.add_middleware(
 ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=True)
 
 # Configure the AI API client with the API key from environment variables
-genai.configure(api_key=os.getenv('GENAI_API_KEY'))  # Ensure GENAI_API_KEY is set in .env
+GENAI_API_KEY = os.getenv('GENAI_API_KEY')
+if not GENAI_API_KEY:
+    raise ValueError("GENAI_API_KEY is not set in the environment variables.")
+genai.configure(api_key=GENAI_API_KEY)
 
 # Define the generation settings for the Gemini model
 generation_config = {
@@ -60,13 +67,67 @@ model = genai.GenerativeModel(
 # Start a chat session with the model
 chat_session = model.start_chat(history=[])
 
-# Function to normalize text
+# MongoDB Configuration
+MONGODB_URI = os.getenv("MONGODB_URI")
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI is not set in the environment variables.")
+
+client = AsyncIOMotorClient(MONGODB_URI)
+db = client["consume_wise_db"]
+products_collection = db["products"]
+
+# Pydantic Models
+
+class ProprietaryClaim(BaseModel):
+    claim: str
+    reason: Optional[str] = None
+
+class NutritionalInfo(BaseModel):
+    serving_size: Optional[str] = None
+    calories: Optional[float] = None
+    carbohydrates: Optional[float] = None
+    proteins: Optional[float] = None
+    fats: Optional[float] = None
+    fiber: Optional[float] = None
+    # Add other nutritional fields as needed
+
+class HealthScore(BaseModel):
+    score: int
+    review: str
+
+class Product(BaseModel):
+    product_name: str = Field(..., example="Organic Almond Milk")
+    product_qty: str = Field(..., example="1 Liter")
+    brand_name: str = Field(..., example="Nature's Best")
+    weightage: float = Field(..., example=1000)
+    weight_unit: str = Field(..., example="ml")  # "g" or "ml"
+
+    product_category: str = Field(..., example="Beverages")
+    ingredients: List[str] = Field(..., example=["Water", "Almonds", "Sea Salt"])
+    nutritional_info: Optional[NutritionalInfo] = None
+    proprietary_claims: Optional[List[ProprietaryClaim]] = None
+    analysis: Optional[Dict] = None  # Stores the full analysis JSON
+    health_score: Optional[HealthScore] = None
+    image_url: Optional[str] = None  # URL to the uploaded image
+    purpose: Optional[str] = Field(None, example="Nutritional")  # New Field
+    frequency: Optional[str] = Field(None, example="Daily")  # New Field
+
+    @validator('weight_unit')
+    def validate_weight_unit(cls, v):
+        if v not in ["g", "ml"]:
+            raise ValueError("weight_unit must be either 'g' or 'ml'")
+        return v
+
+# Utility Functions
+
 def normalize_text(text: str) -> str:
     return ' '.join(text.lower().split())
 
-# Function to extract text with coordinates using PaddleOCR
 def extract_text_with_coords(image_bytes: bytes) -> List[Dict]:
     try:
+        if not image_bytes:
+            print("No image data provided.")
+            return []
         # Convert bytes to NumPy array
         nparr = np.frombuffer(image_bytes, np.uint8)
         # Decode image from NumPy array
@@ -91,7 +152,6 @@ def extract_text_with_coords(image_bytes: bytes) -> List[Dict]:
         print(f"Error during OCR: {e}")
         return []
 
-# Function to analyze detected items using Gemini AI
 def analyze_detected_items(extracted_text: str) -> str:
     analysis_prompt = f"""
 You are a nutrition expert. Analyze the following product details extracted from a food label:
@@ -102,6 +162,7 @@ Provide the analysis split into the following sections, using JSON format:
 
 {{
   "NutritionalAnalysis": {{
+    "serving_size": "Specify the serving size here",
     "Macronutrients": {{
       "Carbohydrates": {{
         "Good": ["List of healthy carbohydrate sources with reasons"],
@@ -166,7 +227,13 @@ Provide the analysis split into the following sections, using JSON format:
     "EFSA": "Is this product compliant with EU EFSA regulations? true/false",
     "OtherRegions": "Mention any other regional compliance issues"
   }},
-  "MisleadingClaims": ["List any potentially misleading claims made by the brand and explain why they may be misleading."],
+  "MisleadingClaims": [
+    {{
+      "Claim": "Name of the misleading claim",
+      "Reason": "Why it is misleading"
+    }},
+    ...
+  ],
   "AlternativeHomeMadeProcedure": {{
     "Ingredients": ["List of required ingredients with measurements"],
     "Steps": ["Detailed step-by-step procedure to make the homemade product"]
@@ -180,6 +247,7 @@ Provide the analysis split into the following sections, using JSON format:
 - Do **not** include code fences (e.g., ```).
 - Ensure the JSON is properly formatted and valid.
 - For the "MisleadingClaims" section, provide each claim as an object with "Claim" and "Reason" keys.
+- **Always include the "serving_size" field under "NutritionalAnalysis".**
 """
 
     # Send the message to the AI
@@ -188,7 +256,6 @@ Provide the analysis split into the following sections, using JSON format:
     # Return the AI's response
     return response.text
 
-# Function to parse the AI's analysis response
 def parse_analysis_response(analysis_response: str) -> Dict:
     try:
         # Use regex to extract the JSON object
@@ -197,6 +264,10 @@ def parse_analysis_response(analysis_response: str) -> Dict:
             json_str = match.group(0)
             # Parse the JSON
             analysis = json.loads(json_str)
+            # Ensure 'serving_size' is present
+            if 'NutritionalAnalysis' in analysis:
+                if 'serving_size' not in analysis['NutritionalAnalysis']:
+                    analysis['NutritionalAnalysis']['serving_size'] = None
             return analysis
         else:
             print("No valid JSON object found in the response.")
@@ -208,9 +279,10 @@ def parse_analysis_response(analysis_response: str) -> Dict:
         print("Raw Analysis Response:\n", analysis_response)
         return {}
 
-# Function to highlight the image based on analysis
 def highlight_image(image_bytes: bytes, detected_items: List[Dict], analysis: Dict) -> bytes:
     try:
+        if not image_bytes:
+            raise ValueError("No image data provided for highlighting.")
         # Convert bytes data to a NumPy array
         nparr = np.frombuffer(image_bytes, np.uint8)
         # Decode image from NumPy array
@@ -258,7 +330,6 @@ def highlight_image(image_bytes: bytes, detected_items: List[Dict], analysis: Di
         print(f"Error in highlight_image: {e}")
         raise e
 
-# Function to calculate health score based on analysis
 def calculate_health_score(analysis: Dict) -> int:
     # Start with a perfect health score of 100
     health_score = 100
@@ -288,7 +359,6 @@ def calculate_health_score(analysis: Dict) -> int:
 
     return health_score
 
-# Function to generate an overall review based on analysis and health score
 def generate_overall_review(analysis: Dict, health_score: int) -> str:
     review = []
 
@@ -326,24 +396,22 @@ def generate_overall_review(analysis: Dict, health_score: int) -> str:
 
     return " ".join(review)
 
-# Function to display analysis as HTML (Optional: For backend rendering)
-def display_analysis(analysis: Dict, highlighted_image_bytes: bytes) -> str:
-    # This function can be customized based on how you want to present the analysis
-    # For now, it's a placeholder and not used in the endpoint response
-    pass
+# API Endpoints
 
-# Endpoint to handle image upload and analysis
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...)):
     try:
         # Read image bytes
         image_bytes = await file.read()
 
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded image is empty.")
+
         # Extract text with coordinates
         detected_items = extract_text_with_coords(image_bytes)
 
         if not detected_items:
-            return {"error": "No text detected in the image."}
+            raise HTTPException(status_code=400, detail="No text detected in the image.")
 
         # Prepare extracted text for analysis
         extracted_texts = [item['text'] for item in detected_items]
@@ -356,13 +424,10 @@ async def analyze_image(file: UploadFile = File(...)):
         analysis = parse_analysis_response(analysis_response)
 
         if not analysis:
-            return {"error": "Analysis failed."}
+            raise HTTPException(status_code=500, detail="Analysis failed.")
 
         # Highlight the image based on analysis
         highlighted_image_bytes = highlight_image(image_bytes, detected_items, analysis)
-
-        # Optionally, generate HTML for display (not used in this response)
-        # analysis_html = display_analysis(analysis, highlighted_image_bytes)
 
         # Encode highlighted image to base64 for frontend
         highlighted_image_base64 = base64.b64encode(highlighted_image_bytes).decode('utf-8')
@@ -371,9 +436,177 @@ async def analyze_image(file: UploadFile = File(...)):
             "analysis": analysis,
             "highlighted_image": highlighted_image_base64
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         print(f"Error in /analyze endpoint: {e}")
-        return {"error": "Internal Server Error."}
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
+
+@app.post("/add_product")
+async def add_product(
+    product_name: str = Form(...),
+    product_qty: str = Form(...),
+    brand_name: str = Form(...),
+    weightage: float = Form(...),
+    weight_unit: str = Form(...),  # "g" or "ml"
+    product_category: str = Form(...),
+    ingredients: Optional[str] = Form(None),  # If manual input
+    ingredients_image: Optional[UploadFile] = File(None),  # If image upload
+    purpose: Optional[str] = Form(None),  # New Field
+    frequency: Optional[str] = Form(None)  # New Field
+):
+    try:
+        # Log received data
+        print(f"Received product_name: {product_name}")
+        print(f"Received product_qty: {product_qty}")
+        print(f"Received brand_name: {brand_name}")
+        print(f"Received weightage: {weightage}")
+        print(f"Received weight_unit: {weight_unit}")
+        print(f"Received product_category: {product_category}")
+        print(f"Received ingredients: {ingredients}")
+        print(f"Received ingredients_image: {ingredients_image.filename if ingredients_image else 'None'}")
+        print(f"Received purpose: {purpose}")
+        print(f"Received frequency: {frequency}")
+
+        # Handle ingredients
+        if ingredients_image and ingredients_image.filename:
+            # Validate file type
+            if not ingredients_image.content_type.startswith('image/'):
+                raise HTTPException(status_code=400, detail="Uploaded file is not an image.")
+
+            # Optionally, validate file size (e.g., max 5MB)
+            contents = await ingredients_image.read()
+            if len(contents) > 5 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Uploaded image is too large. Max size is 5MB.")
+
+            # Reset the file pointer after reading
+            ingredients_image.file.seek(0)
+
+            # Read image bytes
+            image_bytes = await ingredients_image.read()
+            if not image_bytes:
+                raise HTTPException(status_code=400, detail="Uploaded ingredients image is empty.")
+            detected_items = extract_text_with_coords(image_bytes)
+            if not detected_items:
+                raise HTTPException(status_code=400, detail="No text detected in the ingredients image.")
+            ingredients_list = [item['text'] for item in detected_items]
+        elif ingredients:
+            # Split ingredients by comma and strip whitespace
+            ingredients_list = [ing.strip() for ing in ingredients.split(",")]
+        else:
+            raise HTTPException(status_code=400, detail="Ingredients are required either via manual input or image upload.")
+
+        # Prepare extracted text for Gemini API
+        extracted_text = ', '.join(ingredients_list)
+
+        # Analyze with Gemini API
+        analysis_response = analyze_detected_items(extracted_text)
+
+        # Parse the analysis response
+        analysis = parse_analysis_response(analysis_response)
+
+        if not analysis:
+            raise HTTPException(status_code=500, detail="Failed to analyze ingredients with Gemini API.")
+
+        # Calculate health score
+        health_score_value = calculate_health_score(analysis)
+        overall_review = generate_overall_review(analysis, health_score_value)
+
+        health_score = HealthScore(
+            score=health_score_value,
+            review=overall_review
+        )
+
+        # Extract proprietary claims from analysis
+        misleading_claims = analysis.get("MisleadingClaims", [])
+        proprietary_claims = [ProprietaryClaim(claim=item['Claim'], reason=item.get('Reason')) for item in misleading_claims]
+
+        # Handle image storage (Optional)
+        # For simplicity, we're not storing images. If needed, implement image storage and set image_url accordingly.
+
+        # Create Product instance
+        product = Product(
+            product_name=product_name,
+            product_qty=product_qty,
+            brand_name=brand_name,
+            weightage=weightage,
+            weight_unit=weight_unit,
+            product_category=product_category,
+            ingredients=ingredients_list,
+            nutritional_info=analysis.get("NutritionalAnalysis"),
+            proprietary_claims=proprietary_claims if proprietary_claims else None,
+            analysis=analysis,  # Store the full analysis
+            health_score=health_score,
+            image_url=None,  # Placeholder, can be updated if storing images
+            purpose=purpose,  # New Field
+            frequency=frequency  # New Field
+        )
+
+        # Insert into MongoDB
+        result = await products_collection.insert_one(product.dict())
+
+        return {"message": "Product added successfully", "product_id": str(result.inserted_id)}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error in /add_product endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
+
+@app.get("/get_products")
+async def get_products(
+    product_name: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    product_category: Optional[str] = None,
+    purpose: Optional[str] = None,  # New Filter
+    frequency: Optional[str] = None,  # New Filter
+    page: int = 1,
+    limit: int = 10
+):
+    try:
+        query = {}
+        if product_name:
+            # Case-insensitive search for product name
+            query["product_name"] = {"$regex": product_name, "$options": "i"}
+        if brand_name:
+            # Case-insensitive search for brand name
+            query["brand_name"] = {"$regex": brand_name, "$options": "i"}
+        if product_category:
+            # Exact match for category
+            query["product_category"] = product_category
+        if purpose:
+            # Exact match for purpose
+            query["purpose"] = purpose
+        if frequency:
+            # Exact match for frequency
+            query["frequency"] = frequency
+
+        # Pagination
+        skips = limit * (page - 1)
+        cursor = products_collection.find(query).skip(skips).limit(limit)
+        results = []
+        async for document in cursor:
+            document["_id"] = str(document["_id"])  # Convert ObjectId to string
+            results.append(document)
+
+        # Get total count for pagination
+        total_count = await products_collection.count_documents(query)
+
+        return {
+            "page": page,
+            "limit": limit,
+            "total_pages": (total_count + limit - 1) // limit,
+            "total_products": total_count,
+            "products": results
+        }
+    except Exception as e:
+        print(f"Error in /get_products endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
+
+# Optional: Serve Static Files (e.g., images)
+# Uncomment and configure if you decide to store images locally
+
+# from fastapi.staticfiles import StaticFiles
+# app.mount("/images", StaticFiles(directory="images"), name="images")
 
 if __name__ == "__main__":
     import uvicorn

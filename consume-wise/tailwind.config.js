@@ -1,9 +1,11 @@
+// consume-wise-frontend/tailwind.config.js
+
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [
-    "./app/**/*.{js,ts,jsx,tsx}", // For App Router
-    "./pages/**/*.{js,ts,jsx,tsx}", // If using Pages Router
+    "./pages/**/*.{js,ts,jsx,tsx}",
     "./components/**/*.{js,ts,jsx,tsx}",
+    "./app/**/*.{js,ts,jsx,tsx}", // Add if using app directory
   ],
   theme: {
     extend: {},

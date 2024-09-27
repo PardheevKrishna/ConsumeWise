@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retrieve Products - ConsumeWise Admin</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="max-w-5xl mx-auto p-8">
+        <!-- Back to Dashboard Link -->
+        <div class="text-center mb-4">
+            <a href="index.html" class="text-blue-600 hover:underline">← Back to Dashboard</a>
+        </div>
+
+        <h1 class="text-3xl font-bold mb-6 text-center">Retrieve Products</h1>
+
+        <!-- Search Form -->
+        <form id="searchForm" class="bg-white p-6 rounded shadow-md mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                <div>
+                    <label for="search_product_name" class="block text-gray-700">Product Name</label>
+                    <input type="text" id="search_product_name" name="product_name" class="mt-1 block w-full border border-gray-300 rounded p-2" placeholder="Enter product name">
+                </div>
+
+                <div>
+                    <label for="search_brand_name" class="block text-gray-700">Brand Name</label>
+                    <input type="text" id="search_brand_name" name="brand_name" class="mt-1 block w-full border border-gray-300 rounded p-2" placeholder="Enter brand name">
+                </div>
+
+                <div>
+                    <label for="search_product_category" class="block text-gray-700">Product Category</label>
+                    <select id="search_product_category" name="product_category" class="mt-1 block w-full border border-gray-300 rounded p-2">
+                        <option value="">All Categories</option>
+                        <option value="Beverages">Beverages</option>
+                        <option value="Snacks">Snacks</option>
+                        <option value="Dairy">Dairy</option>
+                        <option value="Bakery">Bakery</option>
+                        <option value="Frozen Foods">Frozen Foods</option>
+                        <option value="Personal Care">Personal Care</option>
+                        <option value="Household">Household</option>
+                        <!-- Add more predefined categories as needed -->
+                    </select>
+                </div>
+
+                <!-- New Filter: Purpose -->
+                <div>
+                    <label for="search_purpose" class="block text-gray-700">Purpose</label>
+                    <select id="search_purpose" name="purpose" class="mt-1 block w-full border border-gray-300 rounded p-2">
+                        <option value="">All Purposes</option>
+                        <option value="Nutritional">Nutritional</option>
+                        <option value="Regular">Regular</option>
+                        <option value="Recreational">Recreational</option>
+                        <!-- Add more purposes as needed -->
+                    </select>
+                </div>
+
+                <!-- New Filter: Frequency -->
+                <div>
+                    <label for="search_frequency" class="block text-gray-700">Frequency</label>
+                    <select id="search_frequency" name="frequency" class="mt-1 block w-full border border-gray-300 rounded p-2">
+                        <option value="">All Frequencies</option>
+                        <option value="Daily">Daily</option>
+                        <option value="Weekly">Weekly</option>
+                        <option value="Monthly">Monthly</option>
+                        <!-- Add more frequency options as needed -->
+                    </select>
+                </div>
+            </div>
+
+            <button type="submit" class="mt-4 bg-green-600 text-white p-3 rounded hover:bg-green-700 w-full">Search</button>
+        </form>
+
+        <!-- Results Section -->
+        <div id="results" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Product Cards will be inserted here -->
+        </div>
+    </div>
+
+    <!-- JavaScript to Handle Search and Display Results -->
+    <script>
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const productName = document.getElementById('search_product_name').value.trim();
+            const brandName = document.getElementById('search_brand_name').value.trim();
+            const productCategory = document.getElementById('search_product_category').value;
+            const purpose = document.getElementById('search_purpose').value;
+            const frequency = document.getElementById('search_frequency').value;
+
+            // Build query parameters
+            const params = new URLSearchParams();
+            if (productName) params.append('product_name', productName);
+            if (brandName) params.append('brand_name', brandName);
+            if (productCategory) params.append('product_category', productCategory);
+            if (purpose) params.append('purpose', purpose);
+            if (frequency) params.append('frequency', frequency);
+            params.append('page', '1');
+            params.append('limit', '20');
+
+            try {
+                const response = await fetch(`http://localhost:8000/get_products?${params.toString()}`);
+                const result = await response.json();
+
+                if (response.ok) {
+                    displayResults(result.products);
+                } else {
+                    displayError(result.detail || 'An error occurred while retrieving products.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                displayError('An unexpected error occurred.');
+            }
+        });
+
+        function displayResults(products) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+
+            if (products.length === 0) {
+                resultsDiv.innerHTML = '<p class="text-center text-gray-700">No products found.</p>';
+                return;
+            }
+
+            products.forEach(product => {
+                const card = document.createElement('div');
+                card.className = 'bg-white p-4 rounded shadow';
+
+                // If image_url exists, display the image
+                if (product.image_url) {
+                    const img = document.createElement('img');
+                    img.src = product.image_url.startsWith('http') ? product.image_url : `http://localhost:8000/${product.image_url}`;
+                    img.alt = product.product_name;
+                    img.className = 'w-full h-48 object-cover rounded';
+                    card.appendChild(img);
+                }
+
+                const title = document.createElement('h2');
+                title.className = 'text-xl font-semibold mt-4';
+                title.textContent = product.product_name;
+                card.appendChild(title);
+
+                const brand = document.createElement('p');
+                brand.className = 'text-gray-700';
+                brand.innerHTML = `<strong>Brand:</strong> ${product.brand_name}`;
+                card.appendChild(brand);
+
+                const quantity = document.createElement('p');
+                quantity.className = 'text-gray-700';
+                quantity.innerHTML = `<strong>Quantity:</strong> ${product.product_qty}`;
+                card.appendChild(quantity);
+
+                const weight = document.createElement('p');
+                weight.className = 'text-gray-700';
+                weight.innerHTML = `<strong>Weight:</strong> ${product.weightage} ${product.weight_unit}`;
+                card.appendChild(weight);
+
+                const category = document.createElement('p');
+                category.className = 'text-gray-700';
+                category.innerHTML = `<strong>Category:</strong> ${product.product_category}`;
+                card.appendChild(category);
+
+                const purpose = document.createElement('p');
+                purpose.className = 'text-gray-700';
+                purpose.innerHTML = `<strong>Purpose:</strong> ${product.purpose || 'N/A'}`;
+                card.appendChild(purpose);
+
+                const frequency = document.createElement('p');
+                frequency.className = 'text-gray-700';
+                frequency.innerHTML = `<strong>Frequency:</strong> ${product.frequency || 'N/A'}`;
+                card.appendChild(frequency);
+
+                const ingredients = document.createElement('p');
+                ingredients.className = 'text-gray-700';
+                ingredients.innerHTML = `<strong>Ingredients:</strong> ${product.ingredients.join(', ')}`;
+                card.appendChild(ingredients);
+
+                // Display Health Score
+                if (product.health_score) {
+                    const healthScore = document.createElement('p');
+                    healthScore.className = 'text-gray-700';
+                    healthScore.innerHTML = `<strong>Health Score:</strong> ${product.health_score.score} - ${product.health_score.review}`;
+                    card.appendChild(healthScore);
+                }
+
+                // Display Nutritional Information
+                if (product.nutritional_info) {
+                    const nutrition = document.createElement('div');
+                    nutrition.className = 'mt-4';
+
+                    const nutritionTitle = document.createElement('h3');
+                    nutritionTitle.className = 'text-lg font-semibold';
+                    nutritionTitle.textContent = 'Nutritional Information';
+                    nutrition.appendChild(nutritionTitle);
+
+                    const nutritionList = document.createElement('ul');
+                    nutritionList.className = 'list-disc list-inside';
+
+                    for (const [key, value] of Object.entries(product.nutritional_info)) {
+                        if (value !== null && value !== undefined) {
+                            nutritionList.innerHTML += `<li><strong>${key.replace('_', ' ').toUpperCase()}:</strong> ${value}</li>`;
+                        }
+                    }
+
+                    nutrition.appendChild(nutritionList);
+                    card.appendChild(nutrition);
+                }
+
+                // Display Proprietary Claims
+                if (product.proprietary_claims && product.proprietary_claims.length > 0) {
+                    const claims = document.createElement('div');
+                    claims.className = 'mt-4';
+
+                    const claimsTitle = document.createElement('h3');
+                    claimsTitle.className = 'text-lg font-semibold';
+                    claimsTitle.textContent = 'Proprietary Claims';
+                    claims.appendChild(claimsTitle);
+
+                    const claimsList = document.createElement('ul');
+                    claimsList.className = 'list-disc list-inside';
+
+                    product.proprietary_claims.forEach(claim => {
+                        claimsList.innerHTML += `<li><strong>${claim.claim}:</strong> ${claim.reason || 'No reason provided.'}</li>`;
+                    });
+
+                    claims.appendChild(claimsList);
+                    card.appendChild(claims);
+                }
+
+                // Optional: Display Full Analysis (Collapsed by Default)
+                if (product.analysis) {
+                    const analysisSection = document.createElement('details');
+                    analysisSection.className = 'mt-4';
+
+                    const summary = document.createElement('summary');
+                    summary.className = 'cursor-pointer text-blue-600 hover:underline';
+                    summary.textContent = 'View Full Analysis';
+                    analysisSection.appendChild(summary);
+
+                    const pre = document.createElement('pre');
+                    pre.className = 'mt-2 bg-gray-100 p-2 rounded overflow-auto text-sm';
+                    pre.textContent = JSON.stringify(product.analysis, null, 2);
+                    analysisSection.appendChild(pre);
+
+                    card.appendChild(analysisSection);
+                }
+
+                resultsDiv.appendChild(card);
+            });
+        }
+
+        function displayError(message) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `<p class="text-center text-red-500">${message}</p>`;
+        }
+    </script>
+</body>
+</html>
